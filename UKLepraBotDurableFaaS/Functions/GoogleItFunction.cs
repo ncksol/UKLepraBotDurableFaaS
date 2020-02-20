@@ -1,13 +1,11 @@
 ﻿using System;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
 using System.Linq;
 using Telegram.Bot.Types;
-using Microsoft.WindowsAzure.Storage.Queue;
 using Telegram.Bot.Types.Enums;
+using Microsoft.Azure.WebJobs.Extensions.DurableTask;
+using Telegram.Bot.Requests;
 
 namespace UKLepraBotDurableFaaS.Functions
 {
@@ -16,29 +14,31 @@ namespace UKLepraBotDurableFaaS.Functions
         private static string[] _rubbish = new[] { ".", ",", "-", "=", "#", "!", "?", "%", "@", "\"", "£", "$", "^", "&", "*", "(", ")", "_", "+", "]", "[", "{", "}", ";", ":", "~", "/", "<", ">", };
 
         [FunctionName("GoogleItFunction")]
-        public static async Task Run(
-            [QueueTrigger(Constants.GoogleItQueueName)]Message input,
-            [Queue(Constants.OutputQueueName)] CloudQueue output,
-            ILogger log)
+        public static SendMessageRequest Run([ActivityTrigger] IDurableActivityContext context, ILogger log)
         {
             log.LogInformation("Processing GoogleItFunction");
 
+            SendMessageRequest reply = null;
+
             try
             {
+                var input = context.GetInput<Message>();
+
                 var messageText = input.Text.ToLower() ?? string.Empty;
 
                 if (messageText.ToLower().Contains("погугли"))
                 {
-                    var reply = GoogleCommand(input);
+                    var text = GoogleCommand(input);
 
-                    var data = new { ChatId = input.Chat.Id, ReplyToMessageId = input.MessageId, Text = reply, DisableWebPagePreview = true, ParseMode = (int)ParseMode.MarkdownV2 };
-                    await output.AddMessageAsync(new CloudQueueMessage(JsonConvert.SerializeObject(data)));
+                    reply = new SendMessageRequest(input.Chat.Id, text) { ReplyToMessageId = input.MessageId, DisableWebPagePreview = true, ParseMode = ParseMode.MarkdownV2};
                 }
             }
             catch (Exception e)
             {
                 log.LogError(e, "Error while processing AI function");
             }
+
+            return reply;
         }
 
         private static string GoogleCommand(Message message)

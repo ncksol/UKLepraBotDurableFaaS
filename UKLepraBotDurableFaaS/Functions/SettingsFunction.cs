@@ -1,14 +1,11 @@
 ﻿using System;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
 using System.Linq;
 using System.Collections.Generic;
-using Microsoft.WindowsAzure.Storage.Blob;
 using Telegram.Bot.Types;
-using Microsoft.WindowsAzure.Storage.Queue;
+using Microsoft.Azure.WebJobs.Extensions.DurableTask;
+using Telegram.Bot.Requests;
 
 namespace UKLepraBotDurableFaaS.Functions
 {
@@ -16,36 +13,31 @@ namespace UKLepraBotDurableFaaS.Functions
     {
         private static ChatSettings _chatSettings;
         private static Random _rnd;
-        private static ILogger _log;
 
         [FunctionName("SettingsFunction")]
-        public static async Task Run(
-            [QueueTrigger(Constants.SettingsQueueName)]Message input,
-            [Blob(Constants.ChatSettingsBlobPath)] string chatSettingsString,
-            [Blob(Constants.DataBlobPath)] CloudBlobContainer chatSettingsOutput,
-            [Queue(Constants.OutputQueueName)] CloudQueue output,
+        public static Tuple<SendMessageRequest, ChatSettings> Run([ActivityTrigger] IDurableActivityContext context,
             ILogger log)
         {
-            _log = log;
-
             log.LogInformation("Processing SettingsFunction");
+
+            _rnd = new Random();
+            SendMessageRequest reply = null;
+
             try
             {
-                _rnd = new Random();
+                var input = context.GetInput<Tuple<Message, ChatSettings>>();
 
-                _chatSettings = JsonConvert.DeserializeObject<ChatSettings>(chatSettingsString);
+                _chatSettings = input.Item2;
+                var text = ProcessSettingCommand(input.Item1);
 
-                var reply = ProcessSettingCommand(input);
-                var data = new { ChatId = input.Chat.Id, Text = reply };
-                await output.AddMessageAsync(new CloudQueueMessage(JsonConvert.SerializeObject(data)));
-
-                var settingsBlob = chatSettingsOutput.GetBlockBlobReference("chatsettings.json");
-                await settingsBlob.UploadTextAsync(JsonConvert.SerializeObject(_chatSettings));
+                reply = new SendMessageRequest(input.Item1.Chat.Id, text);
             }
             catch (Exception e)
             {
                 log.LogError(e, "Error while processing Settings function");
             }
+
+            return new Tuple<SendMessageRequest, ChatSettings>(reply, _chatSettings);
         }
 
         private static string ProcessSettingCommand(Message message)

@@ -1,80 +1,76 @@
 ﻿using System;
-using System.Threading.Tasks;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
 using System.Collections.Generic;
-using System.Text.RegularExpressions;
+using System.Linq;
 using Telegram.Bot.Types;
-using Microsoft.WindowsAzure.Storage.Queue;
-using Microsoft.WindowsAzure.Storage.Blob;
+using Microsoft.Azure.WebJobs.Extensions.DurableTask;
+using Telegram.Bot.Requests;
+using Telegram.Bot.Types.InputFiles;
+using System.Text.RegularExpressions;
 
 namespace UKLepraBotDurableFaaS.Functions
 {
-    public static class HuifyFunction
+    public static class ReactionFunction
     {
         private static Random _rnd = new Random();
 
-        [FunctionName("HuifyFunction")]
-        public async static Task Run(
-            [QueueTrigger(Constants.HuifyQueueName)]Message input,
-            [Blob(Constants.ChatSettingsBlobPath)] string chatSettingsString,
-            [Blob(Constants.DataBlobPath)] CloudBlobContainer chatSettingsOutput,
-            [Queue(Constants.OutputQueueName)] CloudQueue output, 
-            ILogger log)
+        [FunctionName("ReactionFunction")]
+        public static RequestBase<Message> Run([ActivityTrigger] IDurableActivityContext context, ILogger log)
         {
-            log.LogInformation("Processing HuifyFunction");
+            log.LogInformation("Processing ReactionFunction");
+
+            RequestBase<Message> reply = null;
 
             try
             {
-                var chatSettings = JsonConvert.DeserializeObject<ChatSettings>(chatSettingsString);
+                var input = context.GetInput<Tuple<Message, ReactionsList, ChatSettings>>();
+                var message = input.Item1;
+                var reactionsList = input.Item2;
+                var chatSettings = input.Item3;
 
-                var shouldProcessMessage = ShouldProcessMessage(chatSettings, input);
-
-                var settingsBlob = chatSettingsOutput.GetBlockBlobReference("chatsettings.json");
-                await settingsBlob.UploadTextAsync(JsonConvert.SerializeObject(chatSettings));
-
-                if(shouldProcessMessage == false) return;
-
-                var message = input.Text;
-                var huifiedMessage = HuifyMeInternal(message);
-
-                var data = new {ChatId = input.Chat.Id, ReplyToMessageId = input.MessageId, Text = huifiedMessage};
-                await output.AddMessageAsync(new CloudQueueMessage(JsonConvert.SerializeObject(data)));
+                if(IsReaction(message, reactionsList, out var reaction))
+                {
+                    var reactionReply = DoReaction(reaction);
+                    if(string.IsNullOrEmpty(reactionReply.Text) == false)
+                    {
+                        reply = new SendMessageRequest(message.Chat.Id, reactionReply.Text) { ReplyToMessageId = message.MessageId};
+                    }
+                    else if(string.IsNullOrEmpty(reactionReply.Sticker) == false)
+                    {
+                        var sticker = new InputOnlineFile(reactionReply.Sticker);
+                        reply = new SendStickerRequest(message.Chat.Id, sticker) {ReplyToMessageId = message.MessageId };
+                    }
+                }
+                else
+                {
+                    var huifiedMessage = HuifyMeInternal(message.Text);
+                    reply = new SendMessageRequest(message.Chat.Id, huifiedMessage) { ReplyToMessageId = message.MessageId };
+                }
             }
             catch (Exception e)
             {
-                log.LogError(e, "Error while huifying message");
+                log.LogError(e, "Error while processing Reaction function");
             }
+
+            return reply;
         }
 
-        private static bool ShouldProcessMessage(ChatSettings chatSettings, Message message)
-        {            
-            var conversationId = message.Chat.Id.ToString();
+        private static Reply DoReaction(Reaction reaction)
+        {
+            var reactionReply = reaction.Replies.Count <= 1 ? reaction.Replies.FirstOrDefault() : reaction.Replies[HelperMethods.RandomInt(reaction.Replies.Count)];
+            return reactionReply;
+        }
 
-            var state = chatSettings.State;
-            var delay = chatSettings.Delay;
-            var delaySettings = chatSettings.DelaySettings;
-            if (!state.ContainsKey(conversationId) || !state[conversationId])//huify is not active or was never activated
-                return false;
+        private static bool IsReaction(Message message, ReactionsList reactionsList, out Reaction reaction)
+        {
+            var messageText = message.Text?.ToLower() ?? string.Empty;
 
-            if (delay.ContainsKey(conversationId))
-            {
-                if(delay[conversationId] > 0)
-                    delay[conversationId] -= 1;
-            }
-            else
-            {
-                Tuple<int, int> delaySetting;
-                if (delaySettings.TryGetValue(conversationId, out delaySetting))
-                    delay[conversationId] = _rnd.Next(delaySetting.Item1, delaySetting.Item2 + 1);
-                else
-                    delay[conversationId] = _rnd.Next(4);
-            }
+            reaction = reactionsList.Items.FirstOrDefault(x => x.Triggers.Any(messageText.Contains));
 
-            if (delay[conversationId] != 0 || message.From.Id.ToString() == Configuration.Instance.MasterId) return false;
-
-            delay.Remove(conversationId);
+            if (reaction == null) return false;
+            if (reaction.IsMentionReply && HelperMethods.MentionsBot(message) == false) return false;
+            if (reaction.IsAlwaysReply == false && HelperMethods.YesOrNo() == false) return false;
 
             return true;
         }
